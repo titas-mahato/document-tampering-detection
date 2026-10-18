@@ -11,7 +11,7 @@ Developed as the semester-end project for **CSE310: Neural Network and Deep Lear
 
 ---
 
-## 📌 Project Overview
+## Project Overview
 
 Digital document fraud has become increasingly sophisticated across banking, insurance, and administrative sectors. Manual inspection of subtle micro-edits—such as altered invoice amounts, swapped dates, or forged stamps—is error-prone and time-consuming.
 
@@ -22,7 +22,7 @@ This project implements a multi-stage deep learning pipeline combining **Error L
 
 ---
 
-## 📊 Dataset: DocTamper
+## Dataset: DocTamper
 
 The project leverages the **DocTamper** benchmark dataset (120,000 scanned documents at 512×512 resolution):
 * **Source & Structure:** LMDB database containing paired document images and binary ground-truth tampering masks (`0` = pristine background, `1` = forged pixel).
@@ -32,7 +32,7 @@ The project leverages the **DocTamper** benchmark dataset (120,000 scanned docum
 
 ---
 
-## 🏗️ Proposed Methodology
+## Proposed Methodology
 
 ```
 Input Document (512×512)
@@ -57,7 +57,7 @@ Input Document (512×512)
 
 ---
 
-## 🎯 Target Performance Metrics
+## Target Performance Metrics
 
 | Task | Primary Metric | Target |
 | :--- | :--- | :--- |
@@ -69,7 +69,7 @@ Input Document (512×512)
 
 ---
 
-## 📁 Repository Structure
+## Repository Structure
 
 ```text
 document-tampering-detection/
@@ -90,7 +90,7 @@ document-tampering-detection/
 
 ---
 
-## 🚀 Getting Started
+## Getting Started
 
 ### 1. Clone the Repository
 ```bash
@@ -111,7 +111,7 @@ pip install -r requirements.txt
 
 ---
 
-## 👥 Team Details
+## Team Details
 
 * **Titas Mahato** — `SAU/CS/BTECH(CSE)/2024/69`
 * **Tanmay Madan** — `SAU/CS/DMTECH(CSE)/2024/31`
