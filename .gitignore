@@ -45,7 +45,8 @@ Thumbs.db
 data/
 datasets/
 
-# Local reference files in docs (keep local, do not push to GitHub)
+# Local reference files (keep local, do not push to GitHub)
 docs/course structure.pdf
 docs/eda-doctamper.ipynb
 docs/guidelines.txt
+features.md
