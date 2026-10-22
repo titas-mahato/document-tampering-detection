@@ -42,8 +42,8 @@ Thumbs.db
 *.keras
 *.weights
 *.lmdb
-data/
-datasets/
+/data/
+/datasets/
 
 # Local reference files (keep local, do not push to GitHub)
 docs/course structure.pdf
