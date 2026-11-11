@@ -1,10 +1,11 @@
 """
-DocTamper: Interactive Document Forgery & Tampering Detection Web Application
+DocTamper AI: Interactive Document Forgery & Tampering Detection Web Application
 CSE310 - Neural Network and Deep Learning Semester-End Project
 Faculty of Engineering & Technology, South Asian University
 """
 
 import os
+import sys
 from pathlib import Path
 import cv2
 import numpy as np
@@ -13,7 +14,7 @@ import streamlit as st
 
 # Configure page layout
 st.set_page_config(
-    page_title="DocTamper | Deep Learning Forgery Detection",
+    page_title="DocTamper AI | Document Forgery Detection",
     page_icon="🛡️",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -24,38 +25,111 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 SAMPLES_DIR = BASE_DIR / "app" / "samples"
 WEIGHTS_DIR = BASE_DIR / "weights"
 
-# Import modular preprocessing functions with self-contained fallback
-import sys
 if str(BASE_DIR) not in sys.path:
-    sys.path.append(str(BASE_DIR))
+    sys.path.insert(0, str(BASE_DIR))
 
+# --- FORENSIC PREPROCESSING (Imported from modular src package) ---
+from src.preprocessing.ela import compute_ela, compute_ela_mean_energy
+from src.preprocessing.edges import compute_laplacian_edges
+
+# --- NEURAL NETWORK MODELS (Imported from modular src.models package) ---
 try:
-    from src.preprocessing.ela import compute_ela, compute_ela_mean_energy
-    from src.preprocessing.edges import compute_laplacian_edges
-except ImportError:
-    import io
-    from PIL import ImageChops, ImageEnhance
+    import torch
+    from src.models import DualStreamCNN, ResNet34UNet
+    TORCH_AVAILABLE = True
+except (ImportError, Exception):
+    TORCH_AVAILABLE = False
 
-    def compute_ela(image, quality=90, multiplier=25.0, return_numpy=False):
-        img_pil = Image.fromarray(image.astype(np.uint8)).convert("RGB") if isinstance(image, np.ndarray) else image.convert("RGB")
-        buf = io.BytesIO()
-        img_pil.save(buf, format="JPEG", quality=quality)
-        buf.seek(0)
-        diff = ImageChops.difference(img_pil, Image.open(buf))
-        enhanced = ImageEnhance.Brightness(diff).enhance(multiplier)
-        return np.array(enhanced, dtype=np.uint8) if return_numpy else enhanced
 
-    def compute_ela_mean_energy(ela_np):
-        gray = np.mean(ela_np, axis=2) if ela_np.ndim == 3 else ela_np
-        return float(np.mean(gray))
+@st.cache_resource
+def load_pytorch_models(clf_path: str, unet_path: str):
+    """Loads and caches PyTorch checkpoints for dual-stream classifier and U-Net localizer."""
+    if not TORCH_AVAILABLE:
+        return None, None
 
-    def compute_laplacian_edges(image, normalize=True):
-        img_np = np.array(image.convert("RGB")) if isinstance(image, Image.Image) else image
-        gray = cv2.cvtColor(img_np.astype(np.uint8), cv2.COLOR_RGB2GRAY) if img_np.ndim == 3 else img_np.astype(np.uint8)
-        kernel = np.array([[-1, -1, -1], [-1, 8, -1], [-1, -1, -1]], dtype=np.float32) / 8.0
-        edges = cv2.filter2D(gray, -1, kernel)
-        return cv2.normalize(edges, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U) if normalize else np.clip(edges, 0, 255).astype(np.uint8)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+    # 1. Load Classifier (CASIA Dual-Stream CNN)
+    clf_model = DualStreamCNN(num_classes=2).to(device)
+    c1 = torch.load(clf_path, map_location=device, weights_only=False)
+    state1 = c1["model_state_dict"] if isinstance(c1, dict) and "model_state_dict" in c1 else c1
+    clf_model.load_state_dict(state1)
+    clf_model.eval()
+
+    # 2. Load U-Net Localizer (DocTamper ResNet34 U-Net)
+    unet_model = ResNet34UNet(pretrained=False).to(device)
+    c2 = torch.load(unet_path, map_location=device, weights_only=False)
+    state2 = c2["model_state_dict"] if isinstance(c2, dict) and "model_state_dict" in c2 else (c2["model"] if "model" in c2 else c2)
+    unet_model.load_state_dict(state2)
+    unet_model.eval()
+
+    return clf_model, unet_model
+
+
+def pytorch_inference(clf_model, unet_model, img_pil: Image.Image, ela_pil: Image.Image, threshold: float = 0.80):
+    """Runs full two-stage deep learning inference using PyTorch models."""
+    device = next(clf_model.parameters()).device
+    orig_w, orig_h = img_pil.size
+
+    # --- STAGE 1: CASIA DUAL-STREAM CLASSIFICATION (224x224) ---
+    rgb_224 = img_pil.resize((224, 224))
+    ela_224 = ela_pil.resize((224, 224))
+
+    # Standard ImageNet normalization
+    mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+    std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+
+    rgb_arr = ((np.array(rgb_224, dtype=np.float32) / 255.0) - mean) / std
+    ela_arr = ((np.array(ela_224, dtype=np.float32) / 255.0) - mean) / std
+
+    rgb_t = torch.tensor(rgb_arr).permute(2, 0, 1).unsqueeze(0).to(device)
+    ela_t = torch.tensor(ela_arr).permute(2, 0, 1).unsqueeze(0).to(device)
+
+    with torch.no_grad():
+        logits_clf = clf_model(rgb_t, ela_t)
+        probs_clf = torch.softmax(logits_clf, dim=1).cpu().numpy()[0]
+
+    # Class 0 = Authentic, Class 1 = Tampered
+    tamper_prob = float(probs_clf[1])
+    is_tampered = bool(tamper_prob > 0.5)
+    confidence = tamper_prob if is_tampered else float(probs_clf[0])
+
+    # --- STAGE 2: DOCTAMPER RESNET34 U-NET LOCALIZATION (512x512) ---
+    rgb_512 = img_pil.resize((512, 512))
+    rgb_512_arr = ((np.array(rgb_512, dtype=np.float32) / 255.0) - mean) / std
+    seg_t = torch.tensor(rgb_512_arr).permute(2, 0, 1).unsqueeze(0).to(device)
+
+    with torch.no_grad():
+        seg_logits = unet_model(seg_t)
+        seg_probs = torch.sigmoid(seg_logits).cpu().numpy()[0, 0]
+
+    # Apply calibrated threshold (0.80 from DocTamper validation sweep)
+    mask_binary = (seg_probs >= threshold).astype(np.uint8) * 255
+    tamper_mask = cv2.resize(mask_binary, (orig_w, orig_h), interpolation=cv2.INTER_NEAREST)
+
+    ela_np = np.array(ela_pil)
+    ela_energy = compute_ela_mean_energy(ela_np)
+
+    return is_tampered, confidence, tamper_mask, ela_energy, seg_probs
+
+
+def heuristic_forensic_detection(img_pil: Image.Image, ela_pil: Image.Image, edges_np: np.ndarray):
+    """Fallback heuristic analysis when PyTorch is not available in local environment."""
+    ela_np = np.array(ela_pil)
+    ela_energy = compute_ela_mean_energy(ela_np)
+    gray_ela = np.mean(ela_np, axis=-1)
+    ela_variance = float(np.var(gray_ela))
+
+    anomaly_score = (ela_energy * 0.4) + (ela_variance * 0.05)
+    threshold = np.percentile(gray_ela, 96.5)
+    tamper_mask = (gray_ela > threshold).astype(np.uint8) * 255
+    kernel = np.ones((5, 5), np.uint8)
+    tamper_mask = cv2.dilate(tamper_mask, kernel, iterations=2)
+    tamper_ratio = (np.sum(tamper_mask > 0) / tamper_mask.size) * 100.0
+
+    is_tampered = bool(anomaly_score > 12.0 or tamper_ratio > 1.2)
+    confidence = min(0.98, max(0.65, 0.50 + (abs(anomaly_score - 12.0) / 20.0)))
+    return is_tampered, confidence, tamper_mask, ela_energy
 
 
 def load_css():
@@ -72,12 +146,6 @@ def load_css():
             color: #4B5563;
             margin-bottom: 1.5rem;
         }
-        .metric-card {
-            background-color: #F3F4F6;
-            border-radius: 8px;
-            padding: 12px;
-            border-left: 4px solid #3B82F6;
-        }
         .status-authentic {
             color: #059669;
             font-weight: 700;
@@ -92,41 +160,9 @@ def load_css():
     """, unsafe_allow_html=True)
 
 
-def heuristic_forensic_detection(img_pil: Image.Image, ela_pil: Image.Image, edges_np: np.ndarray):
-    """
-    Forensic heuristic analysis utilized for live demonstrations when deep model weights (.h5)
-    have not yet been downloaded from Kaggle training runs.
-    """
-    ela_np = np.array(ela_pil)
-    ela_energy = compute_ela_mean_energy(ela_np)
-    
-    # Calculate local variance in ELA and edges
-    gray_ela = np.mean(ela_np, axis=-1)
-    ela_variance = np.var(gray_ela)
-    edge_density = np.mean(edges_np > 50) * 100.0
-
-    # Heuristic score calibrated against DocTamper EDA distributions
-    # Tampered documents exhibit higher ELA variance and localized edge clustering
-    anomaly_score = (ela_energy * 0.4) + (ela_variance * 0.05)
-    
-    # High residual areas generate a pseudo-localization mask
-    threshold = np.percentile(gray_ela, 96.5)
-    tamper_mask = (gray_ela > threshold).astype(np.uint8) * 255
-    # Morphological clean up
-    kernel = np.ones((5, 5), np.uint8)
-    tamper_mask = cv2.dilate(tamper_mask, kernel, iterations=2)
-    tamper_ratio = (np.sum(tamper_mask > 0) / tamper_mask.size) * 100.0
-
-    is_tampered = bool(anomaly_score > 12.0 or tamper_ratio > 1.2)
-    confidence = min(0.98, max(0.65, 0.50 + (abs(anomaly_score - 12.0) / 20.0)))
-
-    return is_tampered, confidence, tamper_mask, ela_energy
-
-
 def main():
     load_css()
-
-    st.markdown('<div class="main-header">🛡️ DocTamper: Document Forgery & Tampering Detection</div>', unsafe_allow_html=True)
+    st.markdown('<div class="main-header">🛡️ DocTamper AI: Document Forgery & Tampering Detection</div>', unsafe_allow_html=True)
     st.markdown('<div class="sub-header">CSE310 Neural Network and Deep Learning | South Asian University</div>', unsafe_allow_html=True)
 
     # Sidebar controls
@@ -168,6 +204,8 @@ def main():
         st.subheader("🔬 Forensic Parameters")
         ela_quality = st.slider("JPEG Compression Quality", min_value=60, max_value=98, value=90, step=2)
         ela_multiplier = st.slider("Error Enhancement Multiplier", min_value=5.0, max_value=40.0, value=25.0, step=5.0)
+        seg_threshold = st.slider("U-Net Decision Threshold", min_value=0.10, max_value=0.95, value=0.80, step=0.05,
+                                  help="Calibrated on DocTamper validation sweep. 0.80 minimizes false alarms.")
 
         st.markdown("---")
         st.caption("Developed by Titas Mahato & Team (SAU B.Tech/M.Tech CSE)")
@@ -181,27 +219,37 @@ def main():
     img_np = np.array(selected_image)
 
     # 1. Compute Forensic Visualizations
-    with st.spinner("Executing forensic pipeline (ELA & Laplacian Filtering)..."):
+    with st.spinner("Executing forensic pipeline (ELA & Neural Inference)..."):
         ela_pil = compute_ela(selected_image, quality=ela_quality, multiplier=ela_multiplier)
         edges_np = compute_laplacian_edges(img_np)
-        
-        # Check for deep model weights
-        classifier_weights = WEIGHTS_DIR / "classifier_best.h5"
-        unet_weights = WEIGHTS_DIR / "unet_best.h5"
 
-        if classifier_weights.exists() and unet_weights.exists():
-            # Neural network inference branch
-            st.success("Loaded trained deep learning weights from weights/")
-            # Predict using models
+        # Check for trained PyTorch weights
+        clf_weights = WEIGHTS_DIR / "casia_dual_stream_best.pth"
+        unet_weights = WEIGHTS_DIR / "doctamper_resnet34_unet_best.pth"
+
+        neural_active = False
+        if TORCH_AVAILABLE and clf_weights.exists() and unet_weights.exists():
+            try:
+                clf_model, unet_model = load_pytorch_models(str(clf_weights), str(unet_weights))
+                if clf_model is not None and unet_model is not None:
+                    is_tampered, confidence, tamper_mask, ela_energy, _ = pytorch_inference(
+                        clf_model, unet_model, selected_image, ela_pil, threshold=seg_threshold
+                    )
+                    neural_active = True
+                    st.success("🤖 Deep Learning Pipeline Active: Stage 1 (CASIA Dual-Stream) & Stage 2 (DocTamper ResNet34 U-Net) loaded from `weights/`.")
+            except Exception as e:
+                st.warning(f"PyTorch model execution encountered: {e}. Falling back to forensic heuristics.")
+
+        if not neural_active:
+            if not TORCH_AVAILABLE:
+                st.info("ℹ️ Running in **Forensic Heuristic Mode** (Error Level Analysis + Laplacian Filtering). Running on Kaggle cloud will activate full neural inference.")
+            else:
+                st.info("ℹ️ Running in **Forensic Heuristic Mode**. Place weights in `weights/` to activate neural models.")
             is_tampered, confidence, tamper_mask, ela_energy = heuristic_forensic_detection(
                 selected_image, ela_pil, edges_np
             )
-        else:
-            is_tampered, confidence, tamper_mask, ela_energy = heuristic_forensic_detection(
-                selected_image, ela_pil, edges_np
-            )
 
-    # 2. Top Metric Cards
+    # 2. Metric Cards
     col1, col2, col3, col4 = st.columns(4)
     with col1:
         verdict_class = "status-tampered" if is_tampered else "status-authentic"
@@ -217,7 +265,7 @@ def main():
 
     st.markdown("---")
 
-    # 3. Four-Panel Forensic Inspection View
+    # 3. Four-Panel Inspection View
     st.subheader("🔍 Multi-Stream Forensic Breakdown")
     p1, p2, p3, p4 = st.columns(4)
 
@@ -235,7 +283,6 @@ def main():
 
     with p4:
         st.markdown("##### 4. Tampering Localization Mask")
-        # Overlay mask in transparent red over original document
         overlay = img_np.copy()
         if is_tampered:
             overlay[tamper_mask > 127] = [230, 40, 40]

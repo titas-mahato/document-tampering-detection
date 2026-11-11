@@ -42,11 +42,10 @@ Thumbs.db
 *.keras
 *.weights
 *.lmdb
+*.pth
 /data/
 /datasets/
 
-# Local reference files (keep local, do not push to GitHub)
-docs/course structure.pdf
-docs/eda-doctamper.ipynb
-docs/guidelines.txt
+# Local reference files & study notes (keep local, do not push to GitHub)
+docs/
 features.md

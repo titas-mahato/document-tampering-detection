@@ -1,91 +1,109 @@
 """
 Dual-Stream CNN Classifier for Document Tampering Detection
 Combines RGB visual features with ELA compression artifact features.
-Corresponds to Course Module 3 (CNNs & Transfer Learning) and Module 2 (Regularization).
+Corresponds to Course Module 3 (CNNs & Multi-modal Architecture) and Module 2 (Regularization).
 """
 
-from typing import Tuple
-import tensorflow as tf
-from tensorflow.keras import layers, models, regularizers
+from typing import Optional
+import os
+
+try:
+    import torch
+    import torch.nn as nn
+    HAS_TORCH = True
+except ImportError:
+    HAS_TORCH = False
 
 
-def build_dual_stream_classifier(
-    input_shape: Tuple[int, int, int] = (512, 512, 3),
-    backbone_type: str = "mobilenetv2",
-    pretrained: bool = True,
-    dropout_rate: float = 0.4,
-    l2_reg: float = 1e-4
-) -> tf.keras.Model:
-    """
-    Constructs a dual-stream neural network for document tampering classification.
+if HAS_TORCH:
+    class CNNFeatureExtractor(nn.Module):
+        """
+        4-block Convolutional feature extractor with Batch Normalization,
+        Max Pooling, and Adaptive Average Pooling.
+        """
+        def __init__(self, in_channels: int = 3):
+            super().__init__()
+            self.features = nn.Sequential(
+                # Block 1
+                nn.Conv2d(in_channels, 32, kernel_size=3, padding=1),
+                nn.BatchNorm2d(32),
+                nn.ReLU(inplace=True),
+                nn.MaxPool2d(2),
 
-    - Stream A (RGB): Extracts deep spatial semantics (font geometry, structural alignment)
-      using a transfer-learned MobileNetV2 backbone.
-    - Stream B (ELA): Extracts high-frequency compression residuals through a dedicated
-      convolutional stream.
-    - Fusion: Concatenates feature vectors into dense regularized layers with Dropout.
+                # Block 2
+                nn.Conv2d(32, 64, kernel_size=3, padding=1),
+                nn.BatchNorm2d(64),
+                nn.ReLU(inplace=True),
+                nn.MaxPool2d(2),
 
-    Args:
-        input_shape: Dimensions of document inputs (H, W, C).
-        backbone_type: Base architecture ('mobilenetv2' or 'resnet50').
-        pretrained: Whether to load ImageNet weights for the RGB backbone.
-        dropout_rate: Dropout probability for regularization (Module 2).
-        l2_reg: L2 weight decay penalty factor.
+                # Block 3
+                nn.Conv2d(64, 128, kernel_size=3, padding=1),
+                nn.BatchNorm2d(128),
+                nn.ReLU(inplace=True),
+                nn.MaxPool2d(2),
 
-    Returns:
-        Compiled or uncompiled tf.keras.Model instance.
-    """
-    input_rgb = layers.Input(shape=input_shape, name="input_rgb")
-    input_ela = layers.Input(shape=input_shape, name="input_ela")
+                # Block 4
+                nn.Conv2d(128, 256, kernel_size=3, padding=1),
+                nn.BatchNorm2d(256),
+                nn.ReLU(inplace=True),
+                nn.MaxPool2d(2),
 
-    # ==========================
-    # STREAM 1: RGB Visual Backbone
-    # ==========================
-    weights = "imagenet" if pretrained else None
-    if backbone_type.lower() == "mobilenetv2":
-        base_model = tf.keras.applications.MobileNetV2(
-            input_shape=input_shape,
-            include_top=False,
-            weights=weights
-        )
-    elif backbone_type.lower() == "resnet50":
-        base_model = tf.keras.applications.ResNet50(
-            input_shape=input_shape,
-            include_top=False,
-            weights=weights
-        )
-    else:
-        raise ValueError(f"Unsupported backbone: {backbone_type}")
+                nn.AdaptiveAvgPool2d((1, 1))
+            )
 
-    # Fine-tuning setup: freeze lower layers initially
-    base_model.trainable = True
-    for layer in base_model.layers[:-25]:
-        layer.trainable = False
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            x = self.features(x)
+            return torch.flatten(x, 1)
 
-    x_rgb = base_model(input_rgb)
-    x_rgb = layers.GlobalAveragePooling2D(name="rgb_gap")(x_rgb)
-    x_rgb = layers.Dense(128, activation="relu", kernel_regularizer=regularizers.l2(l2_reg))(x_rgb)
 
-    # ==========================
-    # STREAM 2: ELA Forensic Stream
-    # ==========================
-    x_ela = layers.Conv2D(32, (3, 3), strides=2, padding="same", activation="relu")(input_ela)
-    x_ela = layers.BatchNormalization()(x_ela)
-    x_ela = layers.Conv2D(64, (3, 3), strides=2, padding="same", activation="relu")(x_ela)
-    x_ela = layers.BatchNormalization()(x_ela)
-    x_ela = layers.Conv2D(128, (3, 3), strides=2, padding="same", activation="relu")(x_ela)
-    x_ela = layers.GlobalAveragePooling2D(name="ela_gap")(x_ela)
-    x_ela = layers.Dense(64, activation="relu", kernel_regularizer=regularizers.l2(l2_reg))(x_ela)
+    class DualStreamCNN(nn.Module):
+        """
+        Dual-Stream Convolutional Neural Network for Forgery Classification.
+        - Stream A: RGB visual features (layout, typography, characters)
+        - Stream B: ELA compression error residuals (re-compression discrepancies)
+        - Fusion: Concatenates both feature vectors (256 + 256 = 512) into a Dense Classifier.
+        """
+        def __init__(self, num_classes: int = 2):
+            super().__init__()
+            self.rgb_branch = CNNFeatureExtractor(in_channels=3)
+            self.ela_branch = CNNFeatureExtractor(in_channels=3)
 
-    # ==========================
-    # MULTI-MODAL FUSION & HEAD
-    # ==========================
-    fused = layers.Concatenate(name="feature_fusion")([x_rgb, x_ela])
-    fused = layers.Dense(128, activation="relu", kernel_regularizer=regularizers.l2(l2_reg))(fused)
-    fused = layers.BatchNormalization()(fused)
-    fused = layers.Dropout(dropout_rate, name="dropout_regularization")(fused)
+            self.classifier = nn.Sequential(
+                nn.Linear(512, 256),
+                nn.BatchNorm1d(256),
+                nn.ReLU(inplace=True),
+                nn.Dropout(0.4),
 
-    output = layers.Dense(1, activation="sigmoid", name="tamper_probability")(fused)
+                nn.Linear(256, 128),
+                nn.ReLU(inplace=True),
+                nn.Dropout(0.3),
 
-    model = models.Model(inputs=[input_rgb, input_ela], outputs=output, name="dual_stream_tamper_classifier")
-    return model
+                nn.Linear(128, num_classes)
+            )
+
+        def forward(self, rgb: torch.Tensor, ela: torch.Tensor) -> torch.Tensor:
+            rgb_f = self.rgb_branch(rgb)
+            ela_f = self.ela_branch(ela)
+            fused = torch.cat((rgb_f, ela_f), dim=1)
+            return self.classifier(fused)
+
+
+    def build_dual_stream_classifier(num_classes: int = 2, weights_path: Optional[str] = None, device: str = "cpu") -> DualStreamCNN:
+        """Instantiates and optionally loads pretrained weights into DualStreamCNN."""
+        model = DualStreamCNN(num_classes=num_classes)
+        if weights_path and os.path.exists(weights_path):
+            checkpoint = torch.load(weights_path, map_location=device, weights_only=False)
+            state_dict = checkpoint["model_state_dict"] if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint else checkpoint
+            model.load_state_dict(state_dict)
+        model.to(device)
+        return model
+
+else:
+    class CNNFeatureExtractor:
+        pass
+
+    class DualStreamCNN:
+        pass
+
+    def build_dual_stream_classifier(*args, **kwargs):
+        raise ImportError("PyTorch is required to build DualStreamCNN. Install with `pip install torch`.")

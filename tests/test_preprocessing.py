@@ -3,9 +3,15 @@ Unit tests for ELA and Laplacian edge preprocessing modules.
 Supports both unittest (standard library) and pytest.
 """
 
+import sys
+from pathlib import Path
 import unittest
 import numpy as np
 from PIL import Image
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.preprocessing.ela import compute_ela, compute_ela_mean_energy
 from src.preprocessing.edges import compute_laplacian_edges

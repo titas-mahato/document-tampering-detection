@@ -3,49 +3,48 @@ Unit tests for Neural Network architectures and loss/metrics.
 Supports both unittest (standard library) and pytest.
 """
 
+import sys
+from pathlib import Path
 import unittest
 import numpy as np
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 try:
-    import tensorflow as tf
-    HAS_TF = True
+    import torch
+    HAS_TORCH = True
 except ImportError:
-    HAS_TF = False
+    HAS_TORCH = False
 
 
 class TestModels(unittest.TestCase):
 
-    @unittest.skipUnless(HAS_TF, "TensorFlow not installed in current environment")
-    def test_unet_output_shape(self):
-        from src.models.unet import build_unet
-        model = build_unet(input_shape=(64, 64, 3), start_filters=16)
-        dummy_input = np.zeros((1, 64, 64, 3), dtype=np.float32)
-        output = model(dummy_input)
-        self.assertEqual(output.shape, (1, 64, 64, 1))
+    @unittest.skipUnless(HAS_TORCH, "PyTorch not installed in current environment")
+    def test_dual_stream_cnn_forward(self):
+        from src.models.cnn_classifier import DualStreamCNN
+        model = DualStreamCNN(num_classes=2)
+        model.eval()
 
-    @unittest.skipUnless(HAS_TF, "TensorFlow not installed in current environment")
-    def test_autoencoder_output_shape(self):
-        from src.models.autoencoder import build_autoencoder
-        model = build_autoencoder(input_shape=(64, 64, 3), latent_dim=32)
-        dummy_input = np.zeros((1, 64, 64, 3), dtype=np.float32)
-        output = model(dummy_input)
-        self.assertEqual(output.shape, (1, 64, 64, 3))
+        dummy_rgb = torch.zeros(2, 3, 224, 224)
+        dummy_ela = torch.zeros(2, 3, 224, 224)
+        with torch.no_grad():
+            out = model(dummy_rgb, dummy_ela)
 
-    @unittest.skipUnless(HAS_TF, "TensorFlow not installed in current environment")
-    def test_dice_coef_identical(self):
-        from src.utils.metrics import dice_coef
-        y_true = tf.constant([[[[1.0], [1.0]], [[0.0], [0.0]]]])
-        y_pred = tf.constant([[[[1.0], [1.0]], [[0.0], [0.0]]]])
-        dice = dice_coef(y_true, y_pred).numpy()
-        self.assertGreater(float(dice), 0.99)
+        self.assertEqual(out.shape, (2, 2))
 
-    @unittest.skipUnless(HAS_TF, "TensorFlow not installed in current environment")
-    def test_iou_metric_identical(self):
-        from src.utils.metrics import iou_metric
-        y_true = tf.constant([[[[1.0], [1.0]], [[0.0], [0.0]]]])
-        y_pred = tf.constant([[[[1.0], [1.0]], [[0.0], [0.0]]]])
-        iou = iou_metric(y_true, y_pred).numpy()
-        self.assertGreater(float(iou), 0.99)
+    @unittest.skipUnless(HAS_TORCH, "PyTorch not installed in current environment")
+    def test_resnet34_unet_forward(self):
+        from src.models.unet import ResNet34UNet
+        model = ResNet34UNet(pretrained=False)
+        model.eval()
+
+        dummy_img = torch.zeros(1, 3, 256, 256)
+        with torch.no_grad():
+            out = model(dummy_img)
+
+        self.assertEqual(out.shape, (1, 1, 256, 256))
 
 
 if __name__ == "__main__":

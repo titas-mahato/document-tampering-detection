@@ -1,91 +1,125 @@
 """
-U-Net Segmentation Network for Pixel-Level Tampering Localization
-Implements an Encoder-Decoder architecture with skip connections.
-Directly aligns with Course Module 3 (Spatial Vision & Segmentation).
+ResNet34 U-Net Architecture for Pixel-Level Document Tampering Localization
+Implements an Encoder-Decoder network with ResNet34 backbone and skip connections.
+Corresponds to Course Module 3 (Spatial Vision & Segmentation) and Module 5 (U-Net).
 """
 
-from typing import Tuple
-import tensorflow as tf
-from tensorflow.keras import layers, models
+from typing import Optional
+import os
+
+try:
+    import torch
+    import torch.nn as nn
+    import torchvision.models as models
+    HAS_TORCH = True
+except ImportError:
+    HAS_TORCH = False
 
 
-def _conv_block(inputs, filters: int, dropout_rate: float = 0.0):
-    """Double convolution block with Batch Normalization and ReLU."""
-    x = layers.Conv2D(filters, (3, 3), padding="same")(inputs)
-    x = layers.BatchNormalization()(x)
-    x = layers.Activation("relu")(x)
+if HAS_TORCH:
+    class DoubleConv(nn.Module):
+        """Standard double 3x3 convolution block with BatchNorm and ReLU."""
+        def __init__(self, in_channels: int, out_channels: int):
+            super().__init__()
+            self.block = nn.Sequential(
+                nn.Conv2d(in_channels, out_channels, 3, padding=1, bias=False),
+                nn.BatchNorm2d(out_channels),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(out_channels, out_channels, 3, padding=1, bias=False),
+                nn.BatchNorm2d(out_channels),
+                nn.ReLU(inplace=True)
+            )
 
-    if dropout_rate > 0.0:
-        x = layers.Dropout(dropout_rate)(x)
-
-    x = layers.Conv2D(filters, (3, 3), padding="same")(x)
-    x = layers.BatchNormalization()(x)
-    x = layers.Activation("relu")(x)
-    return x
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return self.block(x)
 
 
-def build_unet(
-    input_shape: Tuple[int, int, int] = (512, 512, 3),
-    start_filters: int = 32,
-    num_classes: int = 1
-) -> tf.keras.Model:
-    """
-    Constructs a U-Net architecture for localizing tampered document regions.
+    class DecoderBlock(nn.Module):
+        """Upsamples feature maps via bilinear interpolation and concatenates encoder skip connections."""
+        def __init__(self, in_channels: int, skip_channels: int, out_channels: int):
+            super().__init__()
+            self.conv = DoubleConv(in_channels + skip_channels, out_channels)
 
-    Skip connections preserve fine-grained spatial micro-edges from the encoder
-    to the expanding decoder, enabling accurate segmentation of small modified text regions.
+        def forward(self, x: torch.Tensor, skip: torch.Tensor) -> torch.Tensor:
+            x = nn.functional.interpolate(
+                x, size=skip.shape[-2:], mode="bilinear", align_corners=False
+            )
+            return self.conv(torch.cat([x, skip], dim=1))
 
-    Args:
-        input_shape: (H, W, C) input dimensions (default: 512x512x3).
-        start_filters: Base number of filters in the initial layer.
-        num_classes: Output channels (1 for binary tamper mask with sigmoid).
 
-    Returns:
-        U-Net tf.keras.Model instance.
-    """
-    inputs = layers.Input(shape=input_shape, name="unet_input")
+    class ResNet34UNet(nn.Module):
+        """
+        ResNet34 U-Net for Document Tampering Localization.
+        - Encoder: Pretrained ResNet34 extracting multi-scale feature hierarchies.
+        - Decoder: 4-stage upsampling with skip connections preserving fine character details.
+        - Output: 1-channel logit map representing pixel-level tamper probability.
+        """
+        def __init__(self, pretrained: bool = False):
+            super().__init__()
+            try:
+                weights = models.ResNet34_Weights.DEFAULT if pretrained else None
+                backbone = models.resnet34(weights=weights)
+            except Exception:
+                backbone = models.resnet34(weights=None)
 
-    # ==========================
-    # ENCODER (Contracting Path)
-    # ==========================
-    c1 = _conv_block(inputs, start_filters)
-    p1 = layers.MaxPooling2D((2, 2))(c1)
+            self.encoder0 = nn.Sequential(backbone.conv1, backbone.bn1, backbone.relu)
+            self.pool = backbone.maxpool
+            self.encoder1 = backbone.layer1
+            self.encoder2 = backbone.layer2
+            self.encoder3 = backbone.layer3
+            self.encoder4 = backbone.layer4
 
-    c2 = _conv_block(p1, start_filters * 2)
-    p2 = layers.MaxPooling2D((2, 2))(c2)
+            self.decoder4 = DecoderBlock(512, 256, 256)
+            self.decoder3 = DecoderBlock(256, 128, 128)
+            self.decoder2 = DecoderBlock(128, 64, 64)
+            self.decoder1 = DecoderBlock(64, 64, 64)
 
-    c3 = _conv_block(p2, start_filters * 4)
-    p3 = layers.MaxPooling2D((2, 2))(c3)
+            self.final_up = nn.Sequential(
+                nn.Conv2d(64, 32, kernel_size=3, padding=1, bias=False),
+                nn.BatchNorm2d(32),
+                nn.ReLU(inplace=True)
+            )
+            self.output = nn.Conv2d(32, 1, kernel_size=1)
 
-    c4 = _conv_block(p3, start_filters * 8)
-    p4 = layers.MaxPooling2D((2, 2))(c4)
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            orig_size = x.shape[-2:]
 
-    # ==========================
-    # BOTTLENECK
-    # ==========================
-    bn = _conv_block(p4, start_filters * 16, dropout_rate=0.3)
+            e0 = self.encoder0(x)                 # 1/2
+            e1 = self.encoder1(self.pool(e0))     # 1/4
+            e2 = self.encoder2(e1)                # 1/8
+            e3 = self.encoder3(e2)                # 1/16
+            e4 = self.encoder4(e3)                # 1/32
 
-    # ==========================
-    # DECODER (Expanding Path with Skip Connections)
-    # ==========================
-    u4 = layers.Conv2DTranspose(start_filters * 8, (2, 2), strides=(2, 2), padding="same")(bn)
-    u4 = layers.Concatenate()([u4, c4])
-    c5 = _conv_block(u4, start_filters * 8)
+            d4 = self.decoder4(e4, e3)
+            d3 = self.decoder3(d4, e2)
+            d2 = self.decoder2(d3, e1)
+            d1 = self.decoder1(d2, e0)
 
-    u3 = layers.Conv2DTranspose(start_filters * 4, (2, 2), strides=(2, 2), padding="same")(c5)
-    u3 = layers.Concatenate()([u3, c3])
-    c6 = _conv_block(u3, start_filters * 4)
+            x = nn.functional.interpolate(
+                d1, size=orig_size, mode="bilinear", align_corners=False
+            )
+            return self.output(self.final_up(x))
 
-    u2 = layers.Conv2DTranspose(start_filters * 2, (2, 2), strides=(2, 2), padding="same")(c6)
-    u2 = layers.Concatenate()([u2, c2])
-    c7 = _conv_block(u2, start_filters * 2)
 
-    u1 = layers.Conv2DTranspose(start_filters, (2, 2), strides=(2, 2), padding="same")(c7)
-    u1 = layers.Concatenate()([u1, c1])
-    c8 = _conv_block(u1, start_filters)
+    def build_unet(weights_path: Optional[str] = None, device: str = "cpu") -> ResNet34UNet:
+        """Instantiates ResNet34UNet and optionally loads checkpoint weights."""
+        model = ResNet34UNet(pretrained=False)
+        if weights_path and os.path.exists(weights_path):
+            checkpoint = torch.load(weights_path, map_location=device, weights_only=False)
+            state_dict = checkpoint["model_state_dict"] if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint else (checkpoint["model"] if "model" in checkpoint else checkpoint)
+            model.load_state_dict(state_dict)
+        model.to(device)
+        return model
 
-    # Final 1x1 Convolution mapping to binary mask
-    outputs = layers.Conv2D(num_classes, (1, 1), activation="sigmoid", name="tamper_mask")(c8)
+else:
+    class DoubleConv:
+        pass
 
-    model = models.Model(inputs=inputs, outputs=outputs, name="unet_document_tamper_segmentor")
-    return model
+    class DecoderBlock:
+        pass
+
+    class ResNet34UNet:
+        pass
+
+    def build_unet(*args, **kwargs):
+        raise ImportError("PyTorch is required to build ResNet34UNet. Install with `pip install torch torchvision`.")
