@@ -5,7 +5,7 @@
 [![TensorFlow](https://img.shields.io/badge/Framework-TensorFlow%20%2F%20Keras-orange.svg)](#)
 [![License](https://img.shields.io/badge/Academic-Project-lightgrey.svg)](#)
 
-An automated visual-forensic deep learning system designed to detect document forgery (splicing, text erasure, copy-move) and localize manipulated pixel regions across scanned documents (receipts, bills, financial statements, and ID forms).
+An automated visual forensic deep learning system designed to detect different kinds of document forgery (splicing, text erasure, copy-move) and localize the exact manipulated pixel regions across scanned documents, such as: receipts, bills, financial statements, and ID forms.
 
 Developed as the semester-end project for **CSE310: Neural Network and Deep Learning** at the Faculty of Engineering and Technology, South Asian University.
 
@@ -13,18 +13,18 @@ Developed as the semester-end project for **CSE310: Neural Network and Deep Lear
 
 ## Project Overview
 
-Digital document fraud has become increasingly sophisticated across banking, insurance, and administrative sectors. Manual inspection of subtle micro-edits—such as altered invoice amounts, swapped dates, or forged stamps—is error-prone and time-consuming.
+It's become easier to commit digital document fraud across banking, insurance, and administrative sectors, as editing tools go mainstream. Manual inspection of subtle micro-edits, such as altered invoice amounts, swapped dates, or forged stamps, is error prone and time consuming, and also unreliable. 
 
-This project implements a multi-stage deep learning pipeline combining **Error Level Analysis (ELA)**, **Laplacian micro-edge filtering**, **Convolutional Neural Networks (CNNs)**, and **U-Net segmentation** to:
+Hence, this project introduces a multi-stage deep learning pipeline combining **Error Level Analysis (ELA)**, **Laplacian micro-edge filtering**, **Convolutional Neural Networks (CNNs)**, and **U-Net segmentation** to:
 1. Classify documents as **Authentic** or **Tampered**.
-2. Generate pixel-level **binary tampering masks** localizing the exact forged zones.
+2. Generate pixel-level **binary tampering masks**, so it can localize the exact forged zones.
 3. Provide visual explainability via **Grad-CAM** (Gradient-weighted Class Activation Mapping).
 
 ---
 
 ## Dataset: DocTamper
 
-The project leverages the **DocTamper** benchmark dataset (120,000 scanned documents at 512×512 resolution):
+We've used the **DocTamper** benchmark dataset (120,000 scanned documents at 512×512 resolution):
 * **Source & Structure:** LMDB database containing paired document images and binary ground-truth tampering masks (`0` = pristine background, `1` = forged pixel).
 * **Key Observations from Exploratory Data Analysis (EDA):**
   * **Document-Level Imbalance:** ~84.6% tampered vs. 15.4% authentic documents due to synthetic generation of multiple manipulation variants per original document. Addressed via class-weighted loss and balanced sampling.
